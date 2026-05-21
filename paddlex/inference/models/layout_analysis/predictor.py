@@ -89,6 +89,19 @@ class LayoutAnalysisRunnerPredictor(DetRunnerPredictor):
         # DocLayoutV3 V2: 6 outputs (bbox_pred, bbox_num, mask_pred, qi, rel_logits, roor_logits)
         if len(pred) == 6:
             bbox_pred, bbox_num, mask_pred, qi, rel_logits, roor_logits = pred
+
+            # Detect 4-point model output (10 columns: label, score, x1,y1,x2,y2,x3,y3,x4,y4)
+            quad_all = None
+            if bbox_pred.shape[1] == 10:
+                quad_all = bbox_pred[:, 2:10].copy()  # [B*K, 8]
+                xs = quad_all[:, 0::2]  # x1, x2, x3, x4
+                ys = quad_all[:, 1::2]  # y1, y2, y3, y4
+                bbox_pred = np.column_stack([
+                    bbox_pred[:, 0], bbox_pred[:, 1],
+                    xs.min(axis=1), ys.min(axis=1),
+                    xs.max(axis=1), ys.max(axis=1)
+                ])
+
             bbox_pred_7, bbox_num, mask_pred = decode_reading_order(
                 bbox_pred, bbox_num, mask_pred, rel_logits, roor_logits, qi,
                 order_score_thr=0.5)
@@ -97,10 +110,50 @@ class LayoutAnalysisRunnerPredictor(DetRunnerPredictor):
             for idx in range(len(bbox_num)):
                 K = int(bbox_num[idx])
                 box_idx_end = box_idx_start + K
-                results.append({
+                result_dict = {
                     "boxes": bbox_pred_7[box_idx_start:box_idx_end],
                     "masks": mask_pred[box_idx_start:box_idx_end],
-                })
+                }
+                if quad_all is not None:
+                    result_dict["quad"] = quad_all[box_idx_start:box_idx_end]
+                else:
+                    result_dict["quad"] = None
+                results.append(result_dict)
+                box_idx_start = box_idx_end
+            return results
+
+        # DocLayoutV2 without mask: 5 outputs (bbox_pred, bbox_num, qi, rel_logits, roor_logits)
+        if len(pred) == 5:
+            bbox_pred, bbox_num, qi, rel_logits, roor_logits = pred
+
+            # Detect 4-point model output (10 columns: label, score, x1,y1,x2,y2,x3,y3,x4,y4)
+            quad_all = None
+            if bbox_pred.shape[1] == 10:
+                quad_all = bbox_pred[:, 2:10].copy()  # [B*K, 8]
+                xs = quad_all[:, 0::2]
+                ys = quad_all[:, 1::2]
+                bbox_pred = np.column_stack([
+                    bbox_pred[:, 0], bbox_pred[:, 1],
+                    xs.min(axis=1), ys.min(axis=1),
+                    xs.max(axis=1), ys.max(axis=1)
+                ])
+
+            bbox_pred_7, bbox_num, _ = decode_reading_order(
+                bbox_pred, bbox_num, None, rel_logits, roor_logits, qi,
+                order_score_thr=0.5)
+            results = []
+            box_idx_start = 0
+            for idx in range(len(bbox_num)):
+                K = int(bbox_num[idx])
+                box_idx_end = box_idx_start + K
+                result_dict = {
+                    "boxes": bbox_pred_7[box_idx_start:box_idx_end],
+                }
+                if quad_all is not None:
+                    result_dict["quad"] = quad_all[box_idx_start:box_idx_end]
+                else:
+                    result_dict["quad"] = None
+                results.append(result_dict)
                 box_idx_start = box_idx_end
             return results
 

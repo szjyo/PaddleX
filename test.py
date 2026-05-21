@@ -1,6 +1,6 @@
 from paddlex import create_model
 
-model = create_model(model_name="PP-DocLayoutV2",model_dir="/paddle/LayoutModel-layoutv3_final/inference_model/modeling_v2_mask",device='gpu')
+model = create_model(model_name="PP-DocLayoutV2",model_dir="/paddle/LayoutModel-layoutv3_final/inference_model/modeling_v2_4point",device='gpu')
 # # model = create_model(model_name="PP-DocLayoutV2",device='gpu:2')
 # # model = create_model(model_name="PP-DocLayout-L",device='gpu:2')
 
@@ -41,10 +41,11 @@ import glob
 
 output = model.predict(
   # "/paddle/project/PaddleX/yanbaopptmerge_3f514841b9bba3e68710fde7af9562d36a424736a356ece18bb5eea86b43ada5.pdf_15.jpg",
-  "/paddle/LayoutModel-layoutv3_final/dataset/omnidocbench_newspaper/images/newspaper_5aedf678eff04d8ebac3692d54103e19_1.jpg",
+  "/paddle/LayoutModel-layoutv3_final/dataset/real5_omnidocbench_skew/book_zh_CNASGL0072018_extracted_page_48.png",
   # "/paddle/project/PaddleX/pp_ocr_vl_eval_tools/datasets/minibench_v1_5/",
   # "/paddle/project/PaddleX/temp_images/pp_structure_v3_demo.png",
   threshold=0.5,
+  layout_shape_mode = 'auto'
 )
 
 # output = list(model.predict(input="/paddle/project/PaddleX/temp_images/demo_paper.png", use_mask=True,batch_size=2))
