@@ -21,7 +21,7 @@ from ....utils import logging
 from ....utils.deps import function_requires_deps, is_dep_available
 from ...utils.benchmark import benchmark
 from ..object_detection.processors import check_containment, nms
-from .utils import compute_reading_order
+from .utils import compute_reading_order, validate_decode_mode
 
 if is_dep_available("opencv-contrib-python"):
     import cv2
@@ -984,7 +984,8 @@ class LayoutAnalysisProcess:
     """
 
     def __init__(
-        self, labels: Optional[List[str]] = None, scale_size: Optional[List[int]] = None
+        self, labels: Optional[List[str]] = None, scale_size: Optional[List[int]] = None,
+        decode_mode: str = "hybrid",
     ) -> None:
         """Initialize the DetPostProcess class.
 
@@ -992,10 +993,12 @@ class LayoutAnalysisProcess:
             threshold (float, optional): The threshold to apply to the detection scores. Defaults to 0.5.
             labels (Optional[List[str]], optional): The list of labels for the detection categories. Defaults to None.
             layout_postprocess (bool, optional): Whether to apply layout post-processing. Defaults to False.
+            decode_mode (str): "hybrid" (default) or "successor_only".
         """
         super().__init__()
         self.labels = labels
         self.scale_size = scale_size
+        self.decode_mode = validate_decode_mode(decode_mode)
 
     def apply(
         self,
@@ -1011,6 +1014,7 @@ class LayoutAnalysisProcess:
         rel_logits: Optional[ndarray] = None,
         roor_logits: Optional[ndarray] = None,
         qi: Optional[ndarray] = None,
+        decode_mode: Optional[str] = None,
     ) -> Boxes:
         """Apply post-processing to the detection boxes.
 
@@ -1022,11 +1026,21 @@ class LayoutAnalysisProcess:
         Returns:
             Boxes: The post-processed detection boxes.
         """
+        mode = validate_decode_mode(
+            self.decode_mode if decode_mode is None else decode_mode
+        )
+        order_boxes = None
+        if mode == "successor_only":
+            if (roor_logits is None or qi is None or boxes.ndim != 2
+                    or boxes.shape[1] != 6 or qi.shape != (len(boxes),)):
+                raise ValueError("successor_only requires relation outputs and boxes without existing ranks")
+            order_boxes = boxes.copy()
         if layout_shape_mode == "rect":
             masks = None
             quad = None
         has_order_logits = (
-            rel_logits is not None and roor_logits is not None and qi is not None
+            roor_logits is not None and qi is not None
+            and (rel_logits is not None or mode == "successor_only")
         )
         boxes[:, 2:6] = np.round(boxes[:, 2:6]).astype(int)
         if isinstance(threshold, float):
@@ -1038,8 +1052,11 @@ class LayoutAnalysisProcess:
                 quad = quad[expect_boxes]
             if has_order_logits:
                 qi = qi[expect_boxes]
+            if order_boxes is not None:
+                order_boxes = order_boxes[expect_boxes]
         elif isinstance(threshold, dict):
             category_filtered_boxes = []
+            category_filtered_order_boxes = []
             if masks is not None:
                 category_filtered_masks = []
             if quad is not None:
@@ -1067,6 +1084,15 @@ class LayoutAnalysisProcess:
                 if has_order_logits:
                     category_filtered_qi.append(category_qi[selected_indices])
                 category_filtered_boxes.append(category_boxes[selected_indices])
+                if order_boxes is not None:
+                    category_filtered_order_boxes.append(
+                        order_boxes[cat_mask][selected_indices]
+                    )
+            if order_boxes is not None:
+                order_boxes = (
+                    np.vstack(category_filtered_order_boxes)
+                    if category_filtered_order_boxes else order_boxes[:0]
+                )
             boxes = (
                 np.vstack(category_filtered_boxes)
                 if category_filtered_boxes
@@ -1093,7 +1119,13 @@ class LayoutAnalysisProcess:
 
         # Compute reading order right after threshold filtering
         if has_order_logits and len(boxes) > 0:
-            order = compute_reading_order(boxes, rel_logits, roor_logits, qi)
+            if mode == "successor_only":
+                order = compute_reading_order(
+                    order_boxes, rel_logits, roor_logits, qi,
+                    decode_mode="successor_only",
+                )
+            else:
+                order = compute_reading_order(boxes, rel_logits, roor_logits, qi)
             boxes = np.concatenate(
                 [boxes, order.reshape(-1, 1).astype(np.float32)], axis=1
             )
@@ -1338,6 +1370,7 @@ class LayoutAnalysisProcess:
         layout_shape_mode: Optional[str] = None,
         filter_overlap_boxes: Optional[bool] = None,
         skip_order_labels: Optional[List[str]] = None,
+        decode_mode: Optional[str] = None,
     ) -> List[Boxes]:
         """Apply the post-processing to a batch of outputs.
 
@@ -1373,6 +1406,7 @@ class LayoutAnalysisProcess:
                 rel_logits=output.get("rel_logits", None),
                 roor_logits=output.get("roor_logits", None),
                 qi=output.get("qi", None),
+                decode_mode=decode_mode,
             )
             if filter_overlap_boxes:
                 boxes = filter_boxes(boxes, current_layout_shape_mode)

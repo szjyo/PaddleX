@@ -410,7 +410,48 @@ def decode_reading_order(
     return bbox_pred_7, bbox_num, mask_pred
 
 
-def compute_reading_order(boxes, rel_logits, roor_logits, qi):
+def _get_successor_only_order(succ_b, boxes):
+    """Keep successor constraints; resolve ambiguities with geometry, not global logits."""
+    n = len(boxes)
+    if n == 0:
+        return np.empty(0, dtype=np.int64)
+    corners = boxes[:, 2:].reshape(n, -1, 2)
+    top_left = corners.min(axis=1)
+    sequence = np.lexsort((np.arange(n), top_left[:, 0], top_left[:, 1]))
+    geo_rank = np.empty(n, dtype=np.int64)
+    geo_rank[sequence] = np.arange(n)
+    edges = {
+        (i, j): float(succ_b[i, j])
+        for i in range(n)
+        for j in range(n)
+        if i != j and succ_b[i, j] > 0
+    }
+    dag = _remove_cycles(n, edges)
+    components = _find_connected_components(n, dag)
+    components.sort(key=lambda comp: (float(geo_rank[comp].mean()), min(comp)))
+    result = []
+    for comp in components:
+        nodes = sorted(comp)
+        lookup = {node: index for index, node in enumerate(nodes)}
+        local_edges = [
+            (lookup[i], lookup[j]) for i, j in dag if i in lookup and j in lookup
+        ]
+        local = _topological_sort(
+            len(nodes), local_edges, tiebreaker=geo_rank[nodes]
+        )
+        result.extend(nodes[index] for index in local)
+    positions = np.empty(n, dtype=np.int64)
+    positions[result] = np.arange(n)
+    return positions
+
+
+def validate_decode_mode(decode_mode):
+    if decode_mode not in ("hybrid", "successor_only"):
+        raise ValueError(f"Unsupported reading order decode_mode: {decode_mode!r}")
+    return decode_mode
+
+
+def compute_reading_order(boxes, rel_logits, roor_logits, qi, decode_mode="hybrid"):
     """
     Compute reading order on already-filtered boxes (no score threshold needed).
 
@@ -419,11 +460,35 @@ def compute_reading_order(boxes, rel_logits, roor_logits, qi):
         rel_logits (np.ndarray): Relative order logits [N, N].
         roor_logits (np.ndarray): ROOR order logits [N, N].
         qi (np.ndarray): Query indices [K].
+        decode_mode (str): Defaults to the existing hybrid decoder. In
+            successor_only mode, boxes must retain unrounded coordinates;
+            relative logits are unused and may be None.
 
     Returns:
         np.ndarray: Reading order ranks [K], 0-based.
     """
+    validate_decode_mode(decode_mode)
     K = len(boxes)
+    if decode_mode == "successor_only":
+        if boxes.ndim != 2 or boxes.shape[1] not in (6, 10):
+            raise ValueError("successor_only requires 6/10-column boxes without ranks")
+        if (roor_logits is None or qi is None or roor_logits.ndim != 2
+                or roor_logits.shape[0] != roor_logits.shape[1]
+                or qi.shape != (K,) or not np.issubdtype(qi.dtype, np.integer)):
+            raise ValueError("successor_only requires square successor logits and aligned query indices")
+        if (not np.isfinite(boxes).all() or not np.isfinite(roor_logits).all()
+                or np.any(qi < 0) or np.any(qi >= len(roor_logits))):
+            raise ValueError("Invalid successor-only boxes, logits or query indices")
+        if K <= 1:
+            return np.zeros(K, dtype=np.int64)
+        unique_qi, inv_map = np.unique(qi, return_inverse=True)
+        representatives = [
+            rows[np.argmax(boxes[rows, 1])]
+            for rows in (np.flatnonzero(qi == query) for query in unique_qi)
+        ]
+        sub_succ = roor_logits[np.ix_(unique_qi, unique_qi)]
+        sub_pos = _get_successor_only_order(sub_succ, boxes[representatives])
+        return sub_pos[inv_map]
     if K <= 1:
         return np.zeros(K, dtype=np.int64)
 

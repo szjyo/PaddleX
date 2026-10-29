@@ -22,7 +22,7 @@ from ..object_detection.predictor import DetRunnerPredictor, DetTransformersPred
 from ..object_detection.processors import Resize, ToBatch
 from .processors import LayoutAnalysisProcess
 from .result import LayoutAnalysisResult
-from .utils import STATIC_SHAPE_MODEL_LIST
+from .utils import STATIC_SHAPE_MODEL_LIST, validate_decode_mode
 
 LAYOUT_ANALYSIS_TRANSFORMERS_MODELS = [
     "PP-DocLayoutV2",
@@ -38,6 +38,7 @@ class LayoutAnalysisRunnerPredictor(DetRunnerPredictor):
         self,
         *args,
         img_size: Optional[Union[int, Tuple[int, int]]] = None,
+        decode_mode: Optional[str] = None,
         **kwargs,
     ):
         """Initializes LayoutAnalysisPredictor.
@@ -53,8 +54,13 @@ class LayoutAnalysisRunnerPredictor(DetRunnerPredictor):
                 If it's a tuple of two numbers, then they are used separately for width and height respectively.
                 If it's None, then no unclipping will be performed.
             layout_merge_bboxes_mode (Optional[Union[str, dict]], optional): The mode for merging bounding boxes. Defaults to None.
+            decode_mode (Optional[str]): Reading order decoder. Overrides the model
+                configuration; defaults to hybrid when neither specifies a mode.
             **kwargs: Arbitrary keyword arguments passed to the superclass.
         """
+        self.decode_mode = (
+            validate_decode_mode(decode_mode) if decode_mode is not None else None
+        )
         if img_size is not None:
             assert (
                 self.model_name not in STATIC_SHAPE_MODEL_LIST
@@ -268,6 +274,7 @@ class LayoutAnalysisRunnerPredictor(DetRunnerPredictor):
         layout_shape_mode: Optional[str] = "auto",
         filter_overlap_boxes: Optional[bool] = True,
         skip_order_labels: Optional[List[str]] = None,
+        decode_mode: Optional[str] = None,
     ):
         """
         Process a batch of data through the preprocessing, inference, and postprocessing.
@@ -281,6 +288,7 @@ class LayoutAnalysisRunnerPredictor(DetRunnerPredictor):
             layout_shape_mode (Optional[str], optional): The mode for layout shape. Defaults to "auto", [ "rect", "quad","poly", "auto"]. are supported.
             filter_overlap_boxes (Optional[bool], optional): Whether to filter out overlap boxes. Defaults to True.
             skip_order_labels (Optional[List[str]], optional): The labels to skip order. Defaults to None.
+            decode_mode (Optional[str]): Overrides the configured decoder for this call only.
 
         Returns:
             dict: A dictionary containing the input path, raw image, class IDs, scores, and label names
@@ -303,6 +311,7 @@ class LayoutAnalysisRunnerPredictor(DetRunnerPredictor):
         boxes = self.post_op(
             preds_list,
             datas,
+            decode_mode=decode_mode,
             threshold=threshold if threshold is not None else self.threshold,
             layout_nms=layout_nms or self.layout_nms,
             layout_unclip_ratio=layout_unclip_ratio or self.layout_unclip_ratio,
@@ -371,15 +380,22 @@ class LayoutAnalysisRunnerPredictor(DetRunnerPredictor):
                 "layout_merge_bboxes_mode", None
             )
         scale_size = getattr(self, "target_size", [800, 800])
+        if self.decode_mode is None:
+            self.decode_mode = validate_decode_mode(
+                self.config.get("decode_mode", "hybrid")
+            )
         return LayoutAnalysisProcess(
-            labels=self.config["label_list"], scale_size=scale_size
+            labels=self.config["label_list"], scale_size=scale_size,
+            decode_mode=self.decode_mode,
         )
 
 
 class LayoutAnalysisTransformersPredictor(DetTransformersPredictor):
     """Layout analysis predictor backed by HuggingFace transformers."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, decode_mode: Optional[str] = None, **kwargs):
+        if decode_mode is not None and validate_decode_mode(decode_mode) != "hybrid":
+            raise ValueError("successor_only requires a runner model with query and successor outputs")
         super().__init__(*args, **kwargs)
         self.layout_postprocess = LayoutAnalysisProcess(
             labels=self.labels,
